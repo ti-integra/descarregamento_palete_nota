@@ -1,8 +1,6 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:archive/archive.dart';
-import 'package:xml/xml.dart';
 import 'package:file_picker/file_picker.dart';
 import 'global.dart' as globals;
 
@@ -25,17 +23,19 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// Primeira tela que exibe a lista de arquivos XML (categorias) no ZIP
 class XmlFileListScreen extends StatefulWidget {
+  const XmlFileListScreen({super.key});
+
   @override
   _XmlFileListScreenState createState() => _XmlFileListScreenState();
 }
 
 class _XmlFileListScreenState extends State<XmlFileListScreen> {
-  List<ArchiveFile> xmlFiles = [];
-  TextEditingController _barcodeController = TextEditingController();
+  // List<ArchiveFile> xmlFiles = [];
+  final _barcodeController = TextEditingController();
 
   Future<void> _selectAndExtractXmlFiles() async {
+    List<ArchiveFile> xmlFiles = [];
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
@@ -50,83 +50,94 @@ class _XmlFileListScreenState extends State<XmlFileListScreen> {
       if (zipFilePath == null) {
         return;
       }
-
       final fileBytes = File(zipFilePath).readAsBytesSync();
+      print("filebytes");
       final archive = ZipDecoder().decodeBytes(fileBytes);
-
-      // Filtrar apenas arquivos XML do ZIP
+      print("archive");
       setState(() {
         xmlFiles = archive.files
             .where((file) => file.isFile && file.name.endsWith('.xml'))
             .toList();
+        globals.extractItemsFromXml(xmlFiles);
       });
     } catch (e) {
       print("Erro ao processar o arquivo ZIP: $e");
     }
   }
 
-  List<globals.MyData> _extractItemsFromXml(ArchiveFile file) {
-    final document = XmlDocument.parse(utf8.decode(file.content as List<int>));
-    final List<globals.MyData> items = [];
+  void _showXmlOptionsForBarcode(String barcode) {
+    barcode = barcode.split("]").last.substring(2);
 
-    final detElements = document.findAllElements('det', namespace: '*');
-    for (var det in detElements) {
-      final prod = det.findElements('prod', namespace: '*').first;
-      final eanCode = prod.getElement('cEAN', namespace: '*')?.innerText ?? '';
-      final quantidadeString =
-          prod.getElement('qCom', namespace: '*')?.innerText ?? '0';
-      final quantidadeInt = double.parse(quantidadeString).round();
-      final descricao =
-          prod.getElement('xProd', namespace: '*')?.innerText ?? '';
-
-      items.add(globals.MyData(
-        ean: eanCode,
-        quantidade: quantidadeInt,
-        descricao: descricao,
-      ));
-
-      globals.allItems.add(globals.MyData(
-        ean: eanCode,
-        quantidade: quantidadeInt,
-        descricao: descricao,
-      ));
+    // Filtrar os XMLs que contêm o item com quantidade > 0
+    List<int> availableXmlIndexes = [];
+    for (int i = 0; i < globals.todasNotas.length; i++) {
+      final produtos = globals.todasNotas[i].produtos;
+      if (produtos.any(
+          (item) => item.codigo == barcode && item.quantidadeFaltante > 0)) {
+        availableXmlIndexes.add(i);
+      }
     }
 
-    print(globals.allItems);
-    return items;
+    if (availableXmlIndexes.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.red,
+          content:
+              Text('Produto com EAN $barcode não disponível em nenhum XML.'),
+        ),
+      );
+      return;
+    }
+
+    // Mostrar diálogo para selecionar o XML
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Selecione um XML'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: availableXmlIndexes.map((index) {
+              return ListTile(
+                title: Text(
+                    "${globals.todasNotas[index].numero}\t\t${globals.todasNotas[index].destinatario}"),
+                onTap: () {
+                  Navigator.of(context).pop(); // Fecha o diálogo
+                  _decreaseQuantityInXml(index, barcode);
+                },
+              );
+            }).toList(),
+          ),
+        );
+      },
+    );
   }
 
-  void _searchAndDecreaseQuantity(String barcode) {
+  void _decreaseQuantityInXml(int xmlIndex, String barcode) {
     bool itemFound = false;
 
-    for (var file in xmlFiles) {
-      // Extrair os itens do arquivo XML
-      // List<MyData> items = _extractItemsFromXml(file);
-
-      // Tentar encontrar o primeiro item com EAN correspondente e quantidade > 0
-      for (var item in globals.allItems) {
-        if (item.ean == barcode && item.quantidade > 0) {
-          print(item.quantidade);
-          setState(() {
-            item.quantidade -= 1;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text(
-                    'Quantidade de ${item.descricao} atualizada para ${item.quantidade}.')),
-          );
-          itemFound = true;
-          break;
-        }
+    for (var item in globals.todasNotas[xmlIndex].produtos) {
+      if (item.codigo == barcode && item.quantidadeFaltante > 0) {
+        setState(() {
+          item.quantidadeFaltante -= 1;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Quantidade de ${item.descricao} atualizada para ${item.quantidadeFaltante} no arquivo ${globals.todasNotas[xmlIndex].numero}.'),
+          ),
+        );
+        itemFound = true;
+        break;
       }
-      if (itemFound) break;
     }
 
     if (!itemFound) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content: Text(
-                'Item com EAN $barcode não encontrado ou todos os itens estão com quantidade zero.')),
+          backgroundColor: Colors.red,
+          content: Text('Produto não encontrado ou quantidade já é zero.'),
+        ),
       );
     }
 
@@ -153,29 +164,30 @@ class _XmlFileListScreenState extends State<XmlFileListScreen> {
               decoration: InputDecoration(
                 labelText: 'Código de Barras',
                 suffixIcon: IconButton(
-                  icon: Icon(Icons.search),
+                  icon: Icon(Icons.cancel),
                   onPressed: () {
-                    _searchAndDecreaseQuantity(_barcodeController.text);
+                    _barcodeController.clear();
                   },
                 ),
               ),
-              onSubmitted: _searchAndDecreaseQuantity,
+              onSubmitted: _showXmlOptionsForBarcode,
             ),
             SizedBox(height: 20),
             Expanded(
               child: ListView.builder(
-                itemCount: xmlFiles.length,
+                itemCount: globals.todasNotas.length,
                 itemBuilder: (context, index) {
-                  final fileName = xmlFiles[index].name;
+                  final fileName =
+                      "Nota: ${globals.todasNotas[index].numero}\nDestinatario: ${globals.todasNotas[index].destinatario}\nChave: ${globals.todasNotas[index].chave} ";
+
                   return ListTile(
-                    title: Text('Nota: $fileName'),
+                    title: Text(fileName),
                     onTap: () {
-                      // Navegar para a tela de detalhes do arquivo XML selecionado
                       Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (context) => XmlFileDetailScreen(
-                            xmlFile: xmlFiles[index],
+                            localIndex: index,
                           ),
                         ),
                       );
@@ -193,44 +205,12 @@ class _XmlFileListScreenState extends State<XmlFileListScreen> {
 
 // Segunda tela que exibe os itens dentro de um arquivo XML específico
 class XmlFileDetailScreen extends StatelessWidget {
-  final ArchiveFile xmlFile;
+  final int localIndex;
 
-  XmlFileDetailScreen({required this.xmlFile});
-
-  List<globals.MyData> _extractItemsFromXml(ArchiveFile file) {
-    final document = XmlDocument.parse(utf8.decode(file.content as List<int>));
-    final List<globals.MyData> items = [];
-
-    final detElements = document.findAllElements('det', namespace: '*');
-    for (var det in detElements) {
-      final prod = det.findElements('prod', namespace: '*').first;
-      final eanCode = prod.getElement('cEAN', namespace: '*')?.innerText ?? '';
-      final quantidadeString =
-          prod.getElement('qCom', namespace: '*')?.innerText ?? '0';
-      final quantidadeInt = double.parse(quantidadeString).round();
-      final descricao =
-          prod.getElement('xProd', namespace: '*')?.innerText ?? '';
-
-      items.add(globals.MyData(
-        ean: eanCode,
-        quantidade: quantidadeInt,
-        descricao: descricao,
-      ));
-
-      globals.allItems.add(globals.MyData(
-        ean: eanCode,
-        quantidade: quantidadeInt,
-        descricao: descricao,
-      ));
-    }
-
-    return items;
-  }
+  const XmlFileDetailScreen({super.key, required this.localIndex});
 
   @override
   Widget build(BuildContext context) {
-    final items = _extractItemsFromXml(xmlFile);
-
     return Scaffold(
       appBar: AppBar(
         title: Text('Itens do Arquivo XML'),
@@ -238,9 +218,10 @@ class XmlFileDetailScreen extends StatelessWidget {
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: ListView.builder(
-          itemCount: globals.allItems.length,
+          // itemCount: globals.allItens[localIndex].length,
+          itemCount: globals.todasNotas[localIndex].produtos.length,
           itemBuilder: (context, index) {
-            final item = globals.allItems[index];
+            final item = globals.todasNotas[localIndex].produtos[index];
             return Card(
               child: Padding(
                 padding: const EdgeInsets.all(8.0),
